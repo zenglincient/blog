@@ -1,0 +1,312 @@
+# 一、小程序的底层
+## 1. 微信小程序的运行环境 & 和普通网页区别
+##### 总结
+> 在 iOS 上，小程序的 javascript 代码是运行在 JavaScriptCore 中，页面是由 WKWebView 来渲染的，环境有 iOS8、iOS9、iOS10
+
+> 在 Android 上，小程序的 javascript 代码是通过 X5 JSCore来解析，页面是由 X5 基于 Mobile Chrome 53/57 内核来渲染的
+
+> 在 开发工具上， 小程序的 javascript 代码是运行在 nw.js中，页面是由 Chrome Webview 来渲染的
+
+**两个要点： 页面在webview，逻辑在JScore**
+![image](https://qimg.mama.cn/record/2018/06/21/740f164e17344e9f9cfa6115b688af14.png)
+
+++注意：小程序的js并不是不跑在webview里的（而是在JavaScriptCore/ X5 JSCore/nwjs中），不能直接操纵DOM和BOM，这就是为什么小程序没有window全局变量。++
+
+++同样，JSCore 的环境和 Node.js 的环境是不一样的，这就是为什么一些npm包无法在小程序中运行（框架也会有问题）++
+
+##### 为什么要这样做 （官方解释）
+> 1. 性能问题： 在 Web 中，UI 渲染跟 JavaScript 的脚本执行都在一个单线程中执行，这就容易导致一些逻辑任务抢占UI渲染的资源（死循环页面会崩）
+> 2. 安全问题 防止开发者通过Dom操作获取敏感数据（open-type）或控制跳到某些页面
+
+### 2. 以微信开发者工具为例
+
+路径
+```bash
+app/contents/Recourse/app.nw
+```
+可以看到其目录结构如下
+```bash
+bin
+html
+js
+node_modules
+package.json
+static
+```
+*微信开发者是一个用NodeWebkit开发的Web应用*
+
+页面是跑在浏览器中，js环境是跑在 nw.js中
+
+顾名思义[NodeWebkit](https://wizardforcel.gitbooks.io/nwjs-doc/content/wiki/package-json.html)就是nodejs + webkit。
+
+
+
+
+
+## 3. 小程序的架构分析
+**小程序是基于双线程模型** 小程序自身分为两个主要部分独立运行：view 模块和 service、 模块。在开发者工具中，它们独立运行于不同的 webivew tag 中。在**真机中，service跑在jscore，页面跑在webview tag 中**
+
+### 逻辑层
+每个小程序会编译出一个 appService 文件。 一个小程序只能有一个 appService 文件， 这个 appservice 文件负责这个小程序的逻辑层。
+![image](https://qimg.mama.cn/record/2018/07/02/562f52d48c1a44a49a9447577349f7b6.jpeg)
+
+所有的 js 文件都通过 appservice 文件引入 
+
+在开发者工具中，appservice 是一个页面。所以我们在开发者工具可以在控制台使用document.getElement 获取到 body
+但是在远程调试中，不行，因为真是环境是跑在jsCore 中，所以小程序没有dom 和 bom
+
+#### appService 实现以下功能
+
+**1. 提供类似[WeixinJSBridge](https://mp.weixin.qq.com/wiki?t=resource/res_main&id=mp1421141115) 的通信**
+
+
+**2. appServiceEngine 实现注册页面和程序**
+
+```
+// 启动
+App  onLaunch => App onShow => Page onLoad => Page onShow => Page onReady
+
+// 隐藏再启动
+Page onHide => App onHide => App onShow => Page onShow
+```
+
+
+**3. 实现路由管理**
+
+路由实现是基于堆栈的，
+```
+wx.navigateTo  // 新的页面入栈
+wx.redirectTo   // 当前页面出栈，新的页面入栈
+wx.navigateBack // 页面不断出栈
+wx.switchTab // 全部页面出栈，tab页入栈
+wx.relaunch // 全部页面出栈，新的页面入栈
+```
+每个页面都是一个webview，过多占用性能会被ios回收销毁。所以小程序会限制页面层级数量（之前是5，现在是10）
+
+**4. 引入所有js，将js代码包裹在 define 域中**
+
+屏蔽掉window方法
+
+ 
+### 页面层
+在控制台输入openVendor()。有以下几个文件
+
+```
+wcc -- 将 wxml 转化为 一段js代码。运行可以得到描述界面节点关系的JSON树结构
+wcsc -- 用于处理 wxss 文件
+WAWebview.js  --  将界面节点关系的JSON树结构转为最终的小程序的标签（web或者原生）也就是 view 模块
+WAService.js 提供了某个基础库的小程序的API
+```
+其中每个基础库的 WAWebview.js 和 WAService.js 都不一样。
+
+将wcc文件和一个新建的 hello.wxml 放入一个文件夹wcc中。其中hello.wxml 文件有以下内容
+```
+<button size="default" type="" plain="false" >{{ main }}</button>
+```
+去wcc目录下执行
+```
+./wcc -d hello.wxml -o hello.js
+```
+生成的是一个hello.js文件。里面只有一个函数$gwx。
+$gwx 函数会返回一个可执行函数，执行后得到虚拟dom
+```
+function $gwx(wxmlPath) {
+    // do sth
+    return function(data) {
+        // do sth
+        return  virtual dom 
+    }
+}
+```
+wcc文件夹下新建一个hello.html
+```html
+<!DOCTYPE html>
+<html>
+<head>
+	<meta http-equiv="Content-Type" content="text/html;charset=UTF-8">
+	<title></title>
+	<script src="./hello.js"></script>
+	<script type="text/javascript">
+ 		console.log($gwx('hello.wxml')({main: '我是按钮'}))
+		
+	</script>
+</head>
+<body>
+	
+</body>
+</html>
+```
+控制台输出如下
+```js
+{
+	"tag": "wx-page",
+	"children": [{
+	"tag": "wx-button",
+	"attr": {
+		"plain": "false",
+		"size": "default",
+		"type": ""
+	},
+	"children": ["我是按钮 "],
+	"raw": {},
+	"generics": {}
+	}]
+}
+```
+以上这个东西，就是[虚拟DOM](https://www.jianshu.com/p/bef1c1ee5a0e) 。小程序的虚拟DOM实现很大部分参考了react。
+
+去WAWebview.js 文件中查找【wx-button】会发现有一个Exparser 方法
+
+Exparser是微信小程序的组件组织框架，负责将虚拟 DOM 转化为页面 DOM 树
+
+**组件分为 web 组件和 Native 组件 （video, canvas, textarea...）**
+
+**web 组件的实现**是基于 [ShadowDOM](https://www.toobug.net/article/what_is_shadow_dom.html) (文档中插入DOM元素的子树，但是子树并不在主DOM中)来实现的 
+
+> 好处：屏蔽html标签（a标签之类的）
+
+**原生组件的渲染流程** 
+> 1. 组件被创建，包括组件属性会依次赋值。
+> 2. 组件被插入到DOM树里，浏览器内核会立即计算布局，此时我们可以读取出组件相对页面的位置（x, y坐标）、宽高。
+> 3. 组件通知客户端，客户端在相同的位置上，根据宽高插入一块原生区域，之后客户端就在这块区域渲染界面
+> 4. 当位置或宽高发生变化时，组件会通知客户端做相应的调整
+
+好处（不占webview线程，视频，canvas）
+
+
+++注意：Native组件层在WebView层之上。这也就是我们开发小程序的时候会碰到的坑，视频，text-area这些是属于native组件，所以其层级是高于其他的，z-index 无效。**cover-view和cover-image可解决**++
+
+**wxml 处理的流程图**
+
+![image](https://qimg.mama.cn/record/2018/06/05/e2bc1b76d18d48ec82e33c5214b372fe.png)
+
+
+同样的方法，复制wcsc文件，新建一个style.wxss 文件，执行
+```
+./wcsc -d style.wxss -o style.js
+```
+会发现 rpx 单位都会被编译成 【%%rpx%%】; 本地链接都会被提示【do-not-use-local-path】。所以小程序不能直接用本地图片
+
+**wxss 处理的流程图**
+![image](https://qimg.mama.cn/record/2018/06/05/634b22607896430b90b6788127e98069.png)
+
+
+
+### 逻辑层和页面层的通信
+视图层和逻辑层通过系统层的 WeixinJSBridge 进行通信。
+逻辑层把数据变化通知到视图层，触发视图层页面更新；
+视图层把触发的事件通知到逻辑层进行业务处理
+。
+```js
+// WeixinJSBridge方法
+WeixinJSBridge.publish  // 发布
+WeixinJSBridge.subscribe    // 订阅
+```
+**小程序通信示意图**
+
+![image](https://qimg.mama.cn/record/2018/06/05/eeb89ccaf5854efa83f8c87aae2d9dfe.jpeg)
+
+**一次经典的通信**
+
+> 1. 用户点击界面触发事件
+> 
+> 2. 对应 view 模块接收事件后将事件封装成所需格式后调用 WeixinJSBridge.publish 方法发送
+> 3. 后台(开发者工具内为 nwjs 运行环境)将数据处理后发送给 service 模块
+> 4. service 模块的 WeixinJSBridge 内回调函数依据传来数据找到对应 view 的 page 模块后执行
+> 5. serivce 层计算该页面 data 后向后台发送 send_app_data 和 appdataChange 事件 
+> 6. 后台 接收到appDataChange 事件数据后再将数据进行简单封装， 最后转发给到 view 层。
+> 7. view 层的 WeixinJSBridge 接收到后台的数据，如果 webviewID 匹配则将 data 与现有页面 data 合并。更新视图
+
+#### 这就导致小程序几乎所有的 API 都是异步的
+> 小程序是基于双线程模型，那就意味着任何数据传递都是线程间的通信，也就是都会有一定的延时。在小程序架构里，这一切都会变成异步。
+
+> 逻辑层与渲染层与客户端原生交互同样是有延时的。以逻辑层为例，开发者的代码是跑在逻辑层这个线程之上，而客户端原生是跑在微信主线程（安卓上是线程）之上微信主线程之间的通信
+
+简单的说，页面和逻辑层通信需要时间，逻辑层调微信的接口也需要时间
+
+
+# 二. 小程序开发
+## 1. 原生
+```
+index.json
+index.wxml
+index.wxss
+index.js
+```
+## 2. wepy
+目前新媒体这边新的小程序基本都采用 wepy 框架进行开发 
+[wepy和小程序官方关系](https://github.com/Tencent/wepy/issues/813)
+> 由腾讯人开发维护，被腾讯开源组认可迁入腾讯源，暂时与微信小程序官方并不大太关联。属于比较独立的开源项目。
+#### 编译实现
+
+
+![image](https://qimg.mama.cn/record/2018/06/07/03161fab8aef44ebbcf3067b336df90d.png)
+
+#### 对小程序的性能优化
+**setData [运行流程](https://cloud.tencent.com/developer/article/1005017)。**
+
+所以在小程序中，最显著的性能优化就是减少setData
+
+
+[**wepy在setData里做了什么**](https://github.com/yingye/Blog/issues/4)
+
+1. 在函数运行周期结束时执行脏数据检查。如果在异步函数中更新数据时，则需要手动执行 $apply()
+2. 脏检查只会有一个再跑
+3. 假如变量A依赖变量B，流程A之后发现B变了，那就再执行一次脏检查
+
+![image](https://raw.githubusercontent.com/yingye/Blog/master/images/wepy_setdata.png)
+#### 目录结构
+参考宝宝记录小程序
+```
+wxapp/baobaojilu
+```
+#### 存在问题
+1. 组件编译更新的问题，因为dom元素是直接拷贝过去的，所以在组件里改不能及时更新
+2. src删除的文件，dist未能删除，目前解决方案是 prod 之前配置先删除整个文件夹
+3. npm 很多包只能引入单文件，对于文件内的其他依赖没法引入。wepy-xx 没问题
+4. **组件是假组件**（和原生有区别，但是有历史原因的）
+
+
+# 三、小程序的业务相关
+## 登录和授权
+## openId 和 unionId
+1. OpenId对应的是应用，一个微信用户在一个应用里，OpenId是唯一的。订阅号、服务号、小程序就是三种不同的应用。如果你的公司有两个服务号呢？那就算两个应用。同一个用户在不同的应用里，OpenId各不相同。
+2. UnionId对应的是微信开放平台，一个微信用户在一个微信开放平台环境里，UnionId是唯一的。这里解释下什么是微信开放平台，微信开放平台就是一个大环境，开放，也就是除了微信自己的订阅号、服务号、小程序这些，还包括APP、PC网站这种本来不属于微信生态系统的应用，OpenId的概念延伸到了APP和PC网站。
+3. 微信开放平台可以自行注册，并需要完成开发者资质认证。认证后，你可以把你已经有的订阅号、服务号、小程序、APP和PC网站这些应用，绑定到你的开放平台账户下面。OpenId就像身份证，在应用内使用，UnionId是全球通用的护照，在微信开放平台这个大环境内使用。
+
+### 
+## wx.login 
+如果用户关注过任意一个同主体公众账号，或者在小程序里有做过授权，那么，直接通过 wxlogin 就能获取到该用户 UnionID。 如果没有，需要用
+```bash
+wx.getUserInfo() // 废弃
+ <button open-type="getUserInfo"></button>
+ ```
+ 需要指导用户主动点击去授权
+ 然后 拿到以下信息 userInfo, iv, encryptedData
+ iv + encryptedData 可以去微信服务器解析出用户的 unionid
+拿到 unionid 之后，就可以把微信用户和我们的账号体系关联起来了
+
+*即使用户没有授权，也可以通过 open-data 展示用户的头像等信息*
+
+### 小程序中 dom 处理
+禁止直接操作 dom，希望用数据驱动dom。但是可以使用SelectorQuery 获取节点信息
+
+
+## 小程序中的运维
+错误处理
+1. [运维中心](https://mp.weixin.qq.com/) 错误捕获，微信通知，告警群
+2. [fundebug](https://docs.fundebug.com/notifier/wxjs/integration/) 。无法抓到 promise 里的 reject
+
+## 小程序数据统计
+1. 小程序数据助手
+2. [阿拉丁统计](http://tongji.aldwx.com/assets) 阿拉丁统计，相比小程序助手数据更全面。同样支持错误捕捉
+ 
+
+# 参考文章
+[小程序开发指南](https://developers.weixin.qq.com/ebook?action=get_post_info&token=935589521&volumn=1&lang=zh_CN&book=miniprogram&docid=0008aeea9a8978ab0086a685851c0a)
+
+[小程序开发资源汇总，请看下面分析文章](https://github.com/justjavac/awesome-wechat-weapp)
+
+[细说微信小程序](http://www.alonemonkey.com/2017/01/18/wechat-small-program/)
+
+[关于wepy性能](https://github.com/Tencent/wepy/issues/1090)
